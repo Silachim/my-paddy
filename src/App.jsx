@@ -1,374 +1,901 @@
-// App.jsx — Capacitor-Ready AI Journal
-// Dependencies: @capacitor/core, @capacitor/filesystem, @capacitor/preferences,
-//               @capacitor-community/speech-recognition, @capacitor/microphone
+// App.jsx — THE JOURNAL — Rich Note Editor
+// Features: text, images (upload/camera), freehand drawing, checklists,
+//           bullet lists, tables, dividers, text formatting, voice, AI reflection
+// No Capacitor dependencies — pure React + browser APIs
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Preferences } from "@capacitor/preferences";
-import { Filesystem, Directory } from "@capacitor/filesystem";
-import { SpeechRecognition } from "@capacitor-community/speech-recognition";
 
-const MOODS = ["😊","😔","😤","😌","🤔","😴","🥳","😰","❤️","🔥"];
-const COLORS = ["#f9a8d4","#86efac","#93c5fd","#fcd34d","#c4b5fd","#fdba74"];
-const GRADIENTS = [
-  "linear-gradient(135deg,#fce4ec,#f3e5f5)",
-  "linear-gradient(135deg,#e8f5e9,#e3f2fd)",
-  "linear-gradient(135deg,#fff8e1,#fce4ec)",
-  "linear-gradient(135deg,#ede7f6,#e8eaf6)",
+// ── Constants ─────────────────────────────────────────────────────────────────
+const MOODS = [
+  { emoji: "🔥", label: "fired up" }, { emoji: "🌊", label: "flowing" },
+  { emoji: "🌫️", label: "foggy" },   { emoji: "⚡", label: "electric" },
+  { emoji: "🪨", label: "heavy" },   { emoji: "🌱", label: "growing" },
+  { emoji: "😰", label: "anxious" }, { emoji: "🥳", label: "joyful" },
+  { emoji: "😴", label: "tired" },   { emoji: "❤️", label: "grateful" },
 ];
-const STORAGE_KEY = "journal_entries_v1";
-// 🔐 Your deployed Firebase Function URL — replace with your actual URL
-// Format: https://<region>-<project-id>.cloudfunctions.net/claudeProxy
-const PROXY_URL = "https://YOUR_REGION-YOUR_PROJECT_ID.cloudfunctions.net/claudeProxy";
+const TAGS = ["work", "relationships", "body", "mind", "creativity", "fear", "gratitude", "dreams"];
+const STORAGE_KEY = "journal_entries_v2";
+const PROXY_URL = "/api/reflect";
+const ANTHROPIC_API_KEY = null;
 
-function formatDate(ts) {
-  return new Date(ts).toLocaleDateString("en-US", {
-    weekday: "short", month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit"
-  });
+// Block types
+const BLOCK = {
+  TEXT: "text", IMAGE: "image", DRAWING: "drawing",
+  CHECKLIST: "checklist", BULLETS: "bullets",
+  TABLE: "table", DIVIDER: "divider", HEADING: "heading", QUOTE: "quote",
+};
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+function loadEntries() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"); } catch { return []; }
 }
-
-// ── Persistent Storage via Capacitor Preferences ──────────────────────────────
-async function loadEntries() {
-  try {
-    const { value } = await Preferences.get({ key: STORAGE_KEY });
-    return value ? JSON.parse(value) : [];
-  } catch { return []; }
-}
-
-async function persistEntries(list) {
-  try {
-    await Preferences.set({ key: STORAGE_KEY, value: JSON.stringify(list) });
-  } catch {}
-}
-
-// ── Save audio blob to device filesystem ──────────────────────────────────────
-async function saveAudioFile(blob, filename) {
-  try {
-    const base64 = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(",")[1]);
-      r.onerror = rej;
-      r.readAsDataURL(blob);
-    });
-    await Filesystem.writeFile({
-      path: `journal_audio/${filename}`,
-      data: base64,
-      directory: Directory.Documents,
-      recursive: true,
-    });
-    return `journal_audio/${filename}`;
-  } catch (e) {
-    console.error("Audio save failed:", e);
-    return null;
-  }
-}
-
-// ── Read audio file back as object URL ────────────────────────────────────────
-async function loadAudioFile(path) {
-  try {
-    const { data } = await Filesystem.readFile({ path, directory: Directory.Documents });
-    const blob = await fetch(`data:audio/webm;base64,${data}`).then(r => r.blob());
-    return URL.createObjectURL(blob);
-  } catch { return null; }
+function persistEntries(list) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
 }
 
 // ── Claude API ────────────────────────────────────────────────────────────────
 async function askClaude(text) {
-  const res = await fetch(PROXY_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ entryText: text }),
-  });
-  const d = await res.json();
-  if (!res.ok) throw new Error(d.error || "Proxy error");
-  return d.reflection || "I couldn't reflect on this entry right now.";
+  if (PROXY_URL) {
+    try {
+      const res = await fetch(PROXY_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entryText: text }) });
+      const d = await res.json();
+      return d.reflection || "No reflection available.";
+    } catch { return "Couldn't reach the AI — try again."; }
+  }
+  if (ANTHROPIC_API_KEY) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: "You are a warm, empathetic journaling assistant. Provide a brief (3-5 sentence) reflection on the journal entry, acknowledge emotions, offer an insight, and end with a gentle follow-up question.", messages: [{ role: "user", content: `Journal entry:\n\n${text}` }] }),
+      });
+      const d = await res.json();
+      return d.content?.[0]?.text || "No reflection available.";
+    } catch { return "Couldn't reach the AI."; }
+  }
+  return "Add your API key or proxy URL to enable AI reflections.";
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function uid() { return Math.random().toString(36).slice(2); }
+function formatDate(ts) { return new Date(ts).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }); }
+function shortDate(ts) { return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric" }).toUpperCase(); }
+function makeBlock(type, data = {}) {
+  const defaults = {
+    [BLOCK.TEXT]: { text: "" },
+    [BLOCK.HEADING]: { text: "", level: 2 },
+    [BLOCK.QUOTE]: { text: "" },
+    [BLOCK.IMAGE]: { src: null, caption: "" },
+    [BLOCK.DRAWING]: { dataURL: null },
+    [BLOCK.CHECKLIST]: { items: [{ id: uid(), text: "", checked: false }] },
+    [BLOCK.BULLETS]: { items: [{ id: uid(), text: "" }] },
+    [BLOCK.TABLE]: { rows: [["", ""], ["", ""]], cols: 2 },
+    [BLOCK.DIVIDER]: {},
+  };
+  return { id: uid(), type, ...defaults[type], ...data };
+}
+function getPlainText(blocks) {
+  return blocks.map(b => {
+    if (b.type === BLOCK.TEXT || b.type === BLOCK.HEADING || b.type === BLOCK.QUOTE) return b.text;
+    if (b.type === BLOCK.CHECKLIST) return b.items.map(i => i.text).join(" ");
+    if (b.type === BLOCK.BULLETS) return b.items.map(i => i.text).join(" ");
+    if (b.type === BLOCK.TABLE) return b.rows.flat().join(" ");
+    return "";
+  }).join(" ").trim();
+}
+
+// ── Drawing Canvas Component ──────────────────────────────────────────────────
+function DrawingCanvas({ onSave, onCancel, initialDataURL }) {
+  const canvasRef = useRef(null);
+  const [drawing, setDrawing] = useState(false);
+  const [tool, setTool] = useState("pen"); // pen | eraser
+  const [color, setColor] = useState("#e8ff00");
+  const [size, setSize] = useState(3);
+  const lastPos = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (initialDataURL) {
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0);
+      img.src = initialDataURL;
+    }
+  }, [initialDataURL]);
+
+  const getPos = (e, canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const src = e.touches ? e.touches[0] : e;
+    return { x: (src.clientX - rect.left) * scaleX, y: (src.clientY - rect.top) * scaleY };
+  };
+
+  const startDraw = (e) => {
+    e.preventDefault();
+    setDrawing(true);
+    lastPos.current = getPos(e, canvasRef.current);
+  };
+
+  const draw = (e) => {
+    e.preventDefault();
+    if (!drawing) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const pos = getPos(e, canvas);
+    ctx.beginPath();
+    ctx.moveTo(lastPos.current.x, lastPos.current.y);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.strokeStyle = tool === "eraser" ? "#1a1a1a" : color;
+    ctx.lineWidth = tool === "eraser" ? size * 6 : size;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    lastPos.current = pos;
+  };
+
+  const endDraw = () => setDrawing(false);
+
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  };
+
+  const COLORS = ["#e8ff00", "#ffffff", "#ff3b3b", "#3baaff", "#3bff8a", "#ff8c3b", "#d93bff", "#ff3bd9"];
+
+  return (
+    <div style={{ background: "#0a0a0a", border: "1px solid #2e2e2e", padding: 16 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={() => setTool("pen")} style={{ fontFamily: "var(--font-mono)", fontSize: "0.58rem", letterSpacing: "0.1em", textTransform: "uppercase", padding: "6px 12px", background: tool === "pen" ? "#e8ff00" : "none", border: "1px solid #2e2e2e", color: tool === "pen" ? "#000" : "#888", cursor: "pointer" }}>Pen</button>
+        <button onClick={() => setTool("eraser")} style={{ fontFamily: "var(--font-mono)", fontSize: "0.58rem", letterSpacing: "0.1em", textTransform: "uppercase", padding: "6px 12px", background: tool === "eraser" ? "#e8ff00" : "none", border: "1px solid #2e2e2e", color: tool === "eraser" ? "#000" : "#888", cursor: "pointer" }}>Eraser</button>
+        <div style={{ display: "flex", gap: 4 }}>
+          {COLORS.map(c => <div key={c} onClick={() => { setTool("pen"); setColor(c); }} style={{ width: 18, height: 18, background: c, border: color === c && tool === "pen" ? "2px solid #fff" : "2px solid transparent", cursor: "pointer" }} />)}
+        </div>
+        <input type="range" min={1} max={20} value={size} onChange={e => setSize(+e.target.value)} style={{ width: 80, accentColor: "#e8ff00" }} />
+        <button onClick={clearCanvas} style={{ fontFamily: "var(--font-mono)", fontSize: "0.58rem", letterSpacing: "0.1em", textTransform: "uppercase", padding: "6px 12px", background: "none", border: "1px solid #2e2e2e", color: "#888", cursor: "pointer", marginLeft: "auto" }}>Clear</button>
+      </div>
+      <canvas
+        ref={canvasRef} width={800} height={400}
+        style={{ width: "100%", height: "auto", display: "block", cursor: tool === "eraser" ? "cell" : "crosshair", touchAction: "none" }}
+        onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+        onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
+      />
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={() => onSave(canvasRef.current.toDataURL())} style={{ fontFamily: "var(--font-mono)", fontSize: "0.6rem", letterSpacing: "0.14em", textTransform: "uppercase", padding: "10px 20px", background: "#e8ff00", border: "none", color: "#000", cursor: "pointer" }}>Save Drawing</button>
+        <button onClick={onCancel} style={{ fontFamily: "var(--font-mono)", fontSize: "0.6rem", letterSpacing: "0.14em", textTransform: "uppercase", padding: "10px 20px", background: "none", border: "1px solid #2e2e2e", color: "#888", cursor: "pointer" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Block Renderer (view mode) ────────────────────────────────────────────────
+function BlockViewer({ block }) {
+  if (block.type === BLOCK.TEXT) return <p style={{ fontSize: "1.15rem", lineHeight: 1.85, fontWeight: 300, whiteSpace: "pre-wrap", marginBottom: 12 }}>{block.text}</p>;
+  if (block.type === BLOCK.HEADING) {
+    const sizes = { 1: "2rem", 2: "1.6rem", 3: "1.2rem" };
+    return <p style={{ fontFamily: "var(--font-display)", fontSize: sizes[block.level] || "1.6rem", letterSpacing: "0.03em", marginBottom: 10, color: "var(--white)" }}>{block.text}</p>;
+  }
+  if (block.type === BLOCK.QUOTE) return (
+    <blockquote style={{ borderLeft: "3px solid var(--accent)", paddingLeft: 20, fontStyle: "italic", fontSize: "1.15rem", lineHeight: 1.85, fontWeight: 300, color: "var(--white)", marginBottom: 16 }}>{block.text}</blockquote>
+  );
+  if (block.type === BLOCK.IMAGE) return block.src ? (
+    <div style={{ marginBottom: 16 }}>
+      <img src={block.src} alt={block.caption} style={{ width: "100%", display: "block", border: "1px solid var(--gray-2)" }} />
+      {block.caption && <p style={{ fontFamily: "var(--font-mono)", fontSize: "0.58rem", color: "var(--gray-4)", letterSpacing: "0.1em", marginTop: 6 }}>{block.caption.toUpperCase()}</p>}
+    </div>
+  ) : null;
+  if (block.type === BLOCK.DRAWING) return block.dataURL ? (
+    <div style={{ marginBottom: 16 }}>
+      <img src={block.dataURL} alt="Drawing" style={{ width: "100%", display: "block", border: "1px solid var(--gray-2)" }} />
+    </div>
+  ) : null;
+  if (block.type === BLOCK.CHECKLIST) return (
+    <div style={{ marginBottom: 16 }}>
+      {block.items.map(item => (
+        <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ width: 16, height: 16, border: `1px solid ${item.checked ? "var(--accent)" : "var(--gray-3)"}`, background: item.checked ? "var(--accent)" : "none", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {item.checked && <span style={{ color: "#000", fontSize: 10, fontWeight: "bold" }}>✓</span>}
+          </div>
+          <span style={{ fontSize: "1rem", fontWeight: 300, textDecoration: item.checked ? "line-through" : "none", color: item.checked ? "var(--gray-3)" : "var(--white)" }}>{item.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+  if (block.type === BLOCK.BULLETS) return (
+    <ul style={{ marginBottom: 16, paddingLeft: 0, listStyle: "none" }}>
+      {block.items.map(item => (
+        <li key={item.id} style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6, fontSize: "1rem", fontWeight: 300 }}>
+          <span style={{ color: "var(--accent)", fontSize: "0.7rem", flexShrink: 0 }}>◆</span>
+          <span>{item.text}</span>
+        </li>
+      ))}
+    </ul>
+  );
+  if (block.type === BLOCK.TABLE) return (
+    <div style={{ marginBottom: 16, overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <tbody>
+          {block.rows.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((cell, ci) => (
+                <td key={ci} style={{ border: "1px solid var(--gray-2)", padding: "8px 12px", fontSize: "0.95rem", fontWeight: ri === 0 ? 400 : 300, fontFamily: ri === 0 ? "var(--font-mono)" : "var(--font-body)", fontSize: ri === 0 ? "0.65rem" : "0.95rem", letterSpacing: ri === 0 ? "0.1em" : 0, textTransform: ri === 0 ? "uppercase" : "none", color: ri === 0 ? "var(--accent)" : "var(--white)" }}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+  if (block.type === BLOCK.DIVIDER) return <div style={{ height: 1, background: "var(--gray-2)", margin: "20px 0" }} />;
+  return null;
+}
+
+// ── Block Editor (edit mode) ──────────────────────────────────────────────────
+function BlockEditor({ block, onChange, onDelete, onMoveUp, onMoveDown, onAddAfter }) {
+  const [editingDrawing, setEditingDrawing] = useState(false);
+
+  const updateBlock = (patch) => onChange({ ...block, ...patch });
+
+  const updateItem = (items, idx, patch) => items.map((it, i) => i === idx ? { ...it, ...patch } : it);
+  const addItem = (items) => [...items, { id: uid(), text: "", checked: false }];
+  const removeItem = (items, idx) => items.length > 1 ? items.filter((_, i) => i !== idx) : items;
+
+  const blockControls = (
+    <div className="block-controls">
+      <button onClick={onMoveUp} title="Move up">↑</button>
+      <button onClick={onMoveDown} title="Move down">↓</button>
+      <button onClick={onDelete} title="Delete block" style={{ color: "#ff3b3b" }}>✕</button>
+    </div>
+  );
+
+  if (block.type === BLOCK.TEXT) return (
+    <div className="block-wrap">
+      {blockControls}
+      <textarea className="block-textarea" value={block.text} onChange={e => updateBlock({ text: e.target.value })} placeholder="Write something..." rows={3} />
+    </div>
+  );
+
+  if (block.type === BLOCK.HEADING) return (
+    <div className="block-wrap">
+      {blockControls}
+      <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+        {[1, 2, 3].map(l => <button key={l} onClick={() => updateBlock({ level: l })} style={{ fontFamily: "var(--font-mono)", fontSize: "0.55rem", padding: "3px 8px", background: block.level === l ? "var(--accent)" : "none", border: "1px solid var(--gray-2)", color: block.level === l ? "#000" : "var(--gray-4)", cursor: "pointer" }}>H{l}</button>)}
+      </div>
+      <input className="block-input" style={{ fontFamily: "var(--font-display)", fontSize: block.level === 1 ? "1.8rem" : block.level === 2 ? "1.4rem" : "1.1rem" }} value={block.text} onChange={e => updateBlock({ text: e.target.value })} placeholder="Heading..." />
+    </div>
+  );
+
+  if (block.type === BLOCK.QUOTE) return (
+    <div className="block-wrap">
+      {blockControls}
+      <div style={{ borderLeft: "3px solid var(--accent)", paddingLeft: 16 }}>
+        <textarea className="block-textarea" style={{ fontStyle: "italic" }} value={block.text} onChange={e => updateBlock({ text: e.target.value })} placeholder="A quote or key insight..." rows={2} />
+      </div>
+    </div>
+  );
+
+  if (block.type === BLOCK.IMAGE) return (
+    <div className="block-wrap">
+      {blockControls}
+      {block.src ? (
+        <div>
+          <img src={block.src} alt="" style={{ width: "100%", display: "block", border: "1px solid var(--gray-2)", marginBottom: 8 }} />
+          <input className="block-input" value={block.caption} onChange={e => updateBlock({ caption: e.target.value })} placeholder="Add a caption..." style={{ fontFamily: "var(--font-mono)", fontSize: "0.6rem", letterSpacing: "0.1em" }} />
+          <button className="block-btn-sm" onClick={() => updateBlock({ src: null, caption: "" })}>Remove image</button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 10 }}>
+          <label className="block-upload-btn">
+            📁 Choose File
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = ev => updateBlock({ src: ev.target.result });
+              reader.readAsDataURL(file);
+            }} />
+          </label>
+          <label className="block-upload-btn">
+            📷 Take Photo
+            <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={e => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = ev => updateBlock({ src: ev.target.result });
+              reader.readAsDataURL(file);
+            }} />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+
+  if (block.type === BLOCK.DRAWING) return (
+    <div className="block-wrap">
+      {blockControls}
+      {editingDrawing || !block.dataURL ? (
+        <DrawingCanvas
+          initialDataURL={block.dataURL}
+          onSave={dataURL => { updateBlock({ dataURL }); setEditingDrawing(false); }}
+          onCancel={() => setEditingDrawing(false)}
+        />
+      ) : (
+        <div>
+          <img src={block.dataURL} alt="Drawing" style={{ width: "100%", display: "block", border: "1px solid var(--gray-2)", marginBottom: 8 }} />
+          <button className="block-btn-sm" onClick={() => setEditingDrawing(true)}>Edit Drawing</button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (block.type === BLOCK.CHECKLIST) return (
+    <div className="block-wrap">
+      {blockControls}
+      <p className="block-type-label">Checklist</p>
+      {block.items.map((item, idx) => (
+        <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <div onClick={() => updateBlock({ items: updateItem(block.items, idx, { checked: !item.checked }) })}
+            style={{ width: 16, height: 16, border: `1px solid ${item.checked ? "var(--accent)" : "var(--gray-3)"}`, background: item.checked ? "var(--accent)" : "none", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {item.checked && <span style={{ color: "#000", fontSize: 10, fontWeight: "bold" }}>✓</span>}
+          </div>
+          <input className="block-input" style={{ flex: 1, textDecoration: item.checked ? "line-through" : "none", color: item.checked ? "var(--gray-3)" : "var(--white)" }}
+            value={item.text} onChange={e => updateBlock({ items: updateItem(block.items, idx, { text: e.target.value }) })}
+            placeholder="Task..." onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); updateBlock({ items: addItem(block.items) }); } }}
+          />
+          <button onClick={() => updateBlock({ items: removeItem(block.items, idx) })} style={{ background: "none", border: "none", color: "var(--gray-3)", cursor: "pointer", fontSize: 14 }}>✕</button>
+        </div>
+      ))}
+      <button className="block-btn-sm" onClick={() => updateBlock({ items: addItem(block.items) })}>+ Add item</button>
+    </div>
+  );
+
+  if (block.type === BLOCK.BULLETS) return (
+    <div className="block-wrap">
+      {blockControls}
+      <p className="block-type-label">Bullet List</p>
+      {block.items.map((item, idx) => (
+        <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <span style={{ color: "var(--accent)", fontSize: "0.7rem", flexShrink: 0 }}>◆</span>
+          <input className="block-input" style={{ flex: 1 }} value={item.text}
+            onChange={e => updateBlock({ items: updateItem(block.items, idx, { text: e.target.value }) })}
+            placeholder="Item..." onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); updateBlock({ items: addItem(block.items) }); } }}
+          />
+          <button onClick={() => updateBlock({ items: removeItem(block.items, idx) })} style={{ background: "none", border: "none", color: "var(--gray-3)", cursor: "pointer", fontSize: 14 }}>✕</button>
+        </div>
+      ))}
+      <button className="block-btn-sm" onClick={() => updateBlock({ items: addItem(block.items) })}>+ Add item</button>
+    </div>
+  );
+
+  if (block.type === BLOCK.TABLE) return (
+    <div className="block-wrap">
+      {blockControls}
+      <p className="block-type-label">Table</p>
+      <div style={{ overflowX: "auto", marginBottom: 8 }}>
+        <table style={{ borderCollapse: "collapse", minWidth: "100%" }}>
+          <tbody>
+            {block.rows.map((row, ri) => (
+              <tr key={ri}>
+                {row.map((cell, ci) => (
+                  <td key={ci} style={{ border: "1px solid var(--gray-2)", padding: 0 }}>
+                    <input value={cell} onChange={e => {
+                      const rows = block.rows.map((r, rr) => r.map((c, cc) => rr === ri && cc === ci ? e.target.value : c));
+                      updateBlock({ rows });
+                    }} style={{ background: "none", border: "none", outline: "none", color: "var(--white)", fontFamily: ri === 0 ? "var(--font-mono)" : "var(--font-body)", fontSize: ri === 0 ? "0.62rem" : "0.95rem", padding: "8px 10px", width: "100%", minWidth: 80 }} placeholder={ri === 0 ? "Header" : "Cell"} />
+                  </td>
+                ))}
+                <td style={{ border: "none", paddingLeft: 4 }}>
+                  {block.rows.length > 1 && <button onClick={() => updateBlock({ rows: block.rows.filter((_, i) => i !== ri) })} style={{ background: "none", border: "none", color: "var(--gray-3)", cursor: "pointer", fontSize: 12 }}>✕</button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="block-btn-sm" onClick={() => updateBlock({ rows: [...block.rows, new Array(block.cols).fill("")] })}>+ Row</button>
+        <button className="block-btn-sm" onClick={() => updateBlock({ cols: block.cols + 1, rows: block.rows.map(r => [...r, ""]) })}>+ Col</button>
+        {block.cols > 1 && <button className="block-btn-sm" onClick={() => updateBlock({ cols: block.cols - 1, rows: block.rows.map(r => r.slice(0, -1)) })}>- Col</button>}
+      </div>
+    </div>
+  );
+
+  if (block.type === BLOCK.DIVIDER) return (
+    <div className="block-wrap" style={{ padding: "8px 0" }}>
+      {blockControls}
+      <div style={{ height: 1, background: "var(--gray-2)" }} />
+    </div>
+  );
+
+  return null;
+}
+
+// ── Toolbar for adding blocks ─────────────────────────────────────────────────
+function AddBlockToolbar({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const tools = [
+    { type: BLOCK.TEXT,      icon: "¶",  label: "Text" },
+    { type: BLOCK.HEADING,   icon: "H",  label: "Heading" },
+    { type: BLOCK.QUOTE,     icon: "❝",  label: "Quote" },
+    { type: BLOCK.CHECKLIST, icon: "✓",  label: "Checklist" },
+    { type: BLOCK.BULLETS,   icon: "◆",  label: "List" },
+    { type: BLOCK.TABLE,     icon: "⊞",  label: "Table" },
+    { type: BLOCK.IMAGE,     icon: "⊡",  label: "Image" },
+    { type: BLOCK.DRAWING,   icon: "✎",  label: "Draw" },
+    { type: BLOCK.DIVIDER,   icon: "—",  label: "Divider" },
+  ];
+  return (
+    <div style={{ margin: "12px 0" }}>
+      <button onClick={() => setOpen(o => !o)} style={{ fontFamily: "var(--font-mono)", fontSize: "0.6rem", letterSpacing: "0.15em", textTransform: "uppercase", padding: "8px 16px", background: "none", border: "1px dashed var(--gray-2)", color: "var(--gray-4)", cursor: "pointer", transition: "all 0.15s", width: "100%" }}
+        onMouseEnter={e => { e.target.style.borderColor = "var(--accent)"; e.target.style.color = "var(--accent)"; }}
+        onMouseLeave={e => { e.target.style.borderColor = "var(--gray-2)"; e.target.style.color = "var(--gray-4)"; }}>
+        {open ? "✕ Close" : "+ Add Block"}
+      </button>
+      {open && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+          {tools.map(t => (
+            <button key={t.type} onClick={() => { onAdd(t.type); setOpen(false); }}
+              style={{ fontFamily: "var(--font-mono)", fontSize: "0.58rem", letterSpacing: "0.1em", textTransform: "uppercase", padding: "10px 8px", background: "var(--gray-1)", border: "1px solid var(--gray-2)", color: "var(--gray-4)", cursor: "pointer", transition: "all 0.15s", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--white)"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--gray-2)"; e.currentTarget.style.color = "var(--gray-4)"; }}>
+              <span style={{ fontSize: "1rem" }}>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [entries, setEntries] = useState([]);
-  const [view, setView] = useState("home");
+  const [entries, setEntries] = useState(() => loadEntries());
+  const [view, setView] = useState("editor");
   const [activeEntry, setActiveEntry] = useState(null);
-  const [draft, setDraft] = useState({ title: "", body: "", mood: "😊", tags: "" });
+
+  const [title, setTitle] = useState("");
+  const [blocks, setBlocks] = useState([makeBlock(BLOCK.TEXT)]);
+  const [mood, setMood] = useState(null);
+  const [tags, setTags] = useState([]);
+
   const [recording, setRecording] = useState(false);
-  const [audioPath, setAudioPath] = useState(null);
   const [audioURL, setAudioURL] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
+
+  const recognitionRef = useRef(null);
   const mediaRecRef = useRef(null);
-  const audioChunks = useRef([]);
+  const audioChunksRef = useRef([]);
   const autoSaveRef = useRef(null);
-  const gradIdx = useRef(Math.floor(Math.random() * GRADIENTS.length));
+  const committedTextRef = useRef("");
+  const activeTextBlockRef = useRef(null); // id of the text block being voice-filled
 
-  // Load entries on mount
-  useEffect(() => { loadEntries().then(setEntries); }, []);
+  useEffect(() => { persistEntries(entries); }, [entries]);
 
-  const saveEntries = useCallback(async (list) => {
-    setEntries(list);
-    await persistEntries(list);
-  }, []);
-
-  // Auto-save draft indicator every 5s
   useEffect(() => {
-    if (view !== "write") return;
+    if (view !== "editor") return;
     autoSaveRef.current = setInterval(() => {
-      if (draft.body.trim() || draft.title.trim()) {
-        setSavedMsg(true);
-        setTimeout(() => setSavedMsg(false), 2000);
-      }
+      if (title || blocks.some(b => getPlainText([b]))) { setSavedMsg(true); setTimeout(() => setSavedMsg(false), 2000); }
     }, 5000);
     return () => clearInterval(autoSaveRef.current);
-  }, [view, draft]);
+  }, [view, title, blocks]);
 
-  // ── Recording: Capacitor SpeechRecognition + MediaRecorder ────────────────
-  const startRecording = async () => {
-    // Request permissions
-    const { speechState } = await SpeechRecognition.requestPermissions();
-    if (speechState !== "granted") { alert("Microphone permission denied."); return; }
+  const saveEntries = useCallback((list) => { setEntries(list); persistEntries(list); }, []);
 
-    // Start speech-to-text (continuous, multi-voice via device mic)
-    await SpeechRecognition.start({
-      language: "en-US",
-      maxResults: 1,
-      prompt: "Speak now...",
-      partialResults: true,
-      popup: false,
-    });
+  const newEntry = () => {
+    setTitle(""); setBlocks([makeBlock(BLOCK.TEXT)]); setMood(null); setTags([]); setAudioURL(null); setView("editor");
+  };
 
-    SpeechRecognition.addListener("partialResults", ({ matches }) => {
-      if (matches?.length) {
-        setDraft(d => ({ ...d, body: d.body + " " + matches[0] }));
+  const updateBlock = (id, patch) => setBlocks(bs => bs.map(b => b.id === id ? { ...b, ...patch } : b));
+  const deleteBlock = (id) => setBlocks(bs => bs.length > 1 ? bs.filter(b => b.id !== id) : bs);
+  const moveBlock = (id, dir) => setBlocks(bs => {
+    const idx = bs.findIndex(b => b.id === id);
+    const next = [...bs];
+    const swap = idx + dir;
+    if (swap < 0 || swap >= next.length) return bs;
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    return next;
+  });
+  const addBlockAfter = (afterId, type) => setBlocks(bs => {
+    const idx = bs.findIndex(b => b.id === afterId);
+    const nb = makeBlock(type);
+    const next = [...bs];
+    next.splice(idx + 1, 0, nb);
+    return next;
+  });
+  const addBlock = (type) => setBlocks(bs => [...bs, makeBlock(type)]);
+
+  const toggleTag = (tag) => setTags(ts => ts.includes(tag) ? ts.filter(t => t !== tag) : [...ts, tag]);
+
+  // ── Voice ───────────────────────────────────────────────────────────────────
+  const startRecording = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Use Chrome or Edge for voice recording."); return; }
+
+    // Find first text block or create one to receive transcript
+    const textBlock = blocks.find(b => b.type === BLOCK.TEXT);
+    if (textBlock) {
+      activeTextBlockRef.current = textBlock.id;
+      committedTextRef.current = textBlock.text;
+    } else {
+      const nb = makeBlock(BLOCK.TEXT);
+      setBlocks(bs => [...bs, nb]);
+      activeTextBlockRef.current = nb.id;
+      committedTextRef.current = "";
+    }
+
+    const recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (e) => {
+      let finalChunk = "", interimChunk = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const text = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalChunk += text + " ";
+        else interimChunk += text;
       }
-    });
+      if (finalChunk) committedTextRef.current += (committedTextRef.current ? " " : "") + finalChunk.trim();
+      const display = committedTextRef.current + (interimChunk ? " " + interimChunk : "");
+      const bid = activeTextBlockRef.current;
+      setBlocks(bs => bs.map(b => b.id === bid ? { ...b, text: display } : b));
+    };
 
-    // Also capture raw audio
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recognition.onerror = (e) => { if (e.error === "not-allowed") alert("Microphone permission denied."); };
+    recognition.onend = () => {
+      const bid = activeTextBlockRef.current;
+      setBlocks(bs => bs.map(b => b.id === bid ? { ...b, text: committedTextRef.current } : b));
+      setRecording(false);
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
       const mr = new MediaRecorder(stream);
-      audioChunks.current = [];
-      mr.ondataavailable = e => audioChunks.current.push(e.data);
-      mr.onstop = async () => {
-        const blob = new Blob(audioChunks.current, { type: "audio/webm" });
-        const filename = `rec_${Date.now()}.webm`;
-        const path = await saveAudioFile(blob, filename);
-        setAudioPath(path);
+      audioChunksRef.current = [];
+      mr.ondataavailable = e => audioChunksRef.current.push(e.data);
+      mr.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         setAudioURL(URL.createObjectURL(blob));
+        stream.getTracks().forEach(t => t.stop());
       };
       mr.start();
       mediaRecRef.current = mr;
-    } catch (e) { console.warn("Raw audio capture unavailable:", e); }
+    }).catch(() => alert("Microphone permission denied."));
 
     setRecording(true);
   };
 
-  const stopRecording = async () => {
-    await SpeechRecognition.stop();
-    SpeechRecognition.removeAllListeners();
-    mediaRecRef.current?.stop();
-    setRecording(false);
-  };
+  const stopRecording = () => { recognitionRef.current?.stop(); mediaRecRef.current?.stop(); };
 
-  // ── Save Entry ─────────────────────────────────────────────────────────────
+  // ── Save ────────────────────────────────────────────────────────────────────
   const saveEntry = async () => {
-    if (!draft.body.trim() && !draft.title.trim()) return;
+    const plainText = getPlainText(blocks);
+    if (!plainText && !title) return;
     setSaving(true);
     const entry = {
-      id: Date.now(),
-      title: draft.title || "Untitled Entry",
-      body: draft.body,
-      mood: draft.mood,
-      tags: draft.tags.split(",").map(t => t.trim()).filter(Boolean),
-      timestamp: Date.now(),
-      audioPath: audioPath || null,
-      aiReflection: "",
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      id: Date.now().toString(), title: title || "Untitled Entry",
+      blocks, mood, tags, timestamp: Date.now(),
+      audioURL: audioURL || null, aiReflection: "",
     };
-    try { entry.aiReflection = await askClaude(draft.body); } catch {}
-    const updated = [entry, ...entries];
-    await saveEntries(updated);
+    try { if (plainText) entry.aiReflection = await askClaude(plainText); } catch {}
+    saveEntries([entry, ...entries]);
     setSaving(false);
-    setDraft({ title: "", body: "", mood: "😊", tags: "" });
-    setAudioPath(null);
-    setAudioURL(null);
     setActiveEntry(entry);
-    setView("entry");
+    setView("detail");
   };
-
-  // ── Load audio when viewing an entry ──────────────────────────────────────
-  useEffect(() => {
-    if (view === "entry" && activeEntry?.audioPath) {
-      loadAudioFile(activeEntry.audioPath).then(setAudioURL);
-    }
-  }, [view, activeEntry]);
 
   const getAIReflection = async (entry) => {
     setAiLoading(true);
     try {
-      const ref = await askClaude(entry.body);
-      const updated = entries.map(e => e.id === entry.id ? { ...e, aiReflection: ref } : e);
-      await saveEntries(updated);
-      setActiveEntry({ ...entry, aiReflection: ref });
+      const reflection = await askClaude(getPlainText(entry.blocks));
+      const updated = entries.map(e => e.id === entry.id ? { ...e, aiReflection: reflection } : e);
+      saveEntries(updated);
+      setActiveEntry({ ...entry, aiReflection: reflection });
     } catch {}
     setAiLoading(false);
   };
 
-  const deleteEntry = async (id) => {
-    const entry = entries.find(e => e.id === id);
-    if (entry?.audioPath) {
-      try { await Filesystem.deleteFile({ path: entry.audioPath, directory: Directory.Documents }); } catch {}
-    }
-    await saveEntries(entries.filter(e => e.id !== id));
-    setView("home");
-  };
+  const deleteEntry = (id) => { saveEntries(entries.filter(e => e.id !== id)); newEntry(); };
 
-  const bg = GRADIENTS[gradIdx.current];
+  const wordCount = getPlainText(blocks).split(/\s+/).filter(Boolean).length;
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div style={{ minHeight: "100vh", background: bg, fontFamily: "'Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto", display: "flex", flexDirection: "column" }}>
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=IBM+Plex+Mono:wght@300;400&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+          --black: #0a0a0a; --white: #f2f0eb; --accent: #e8ff00;
+          --gray-1: #1a1a1a; --gray-2: #2e2e2e; --gray-3: #555; --gray-4: #888;
+          --red: #ff3b3b;
+          --font-display: 'Bebas Neue', sans-serif;
+          --font-body: 'Cormorant Garamond', serif;
+          --font-mono: 'IBM Plex Mono', monospace;
+        }
+        html, body, #root { height: 100%; width: 100%; background: var(--black); color: var(--white); font-family: var(--font-body); font-size: 18px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+        .app { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; }
 
-      {/* Header */}
-      <div style={{ padding: "48px 20px 10px", background: "rgba(255,255,255,0.6)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 10, borderBottom: "1px solid rgba(255,255,255,0.8)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div style={{ fontSize: 22, fontWeight: 800, color: "#6b21a8" }}>✨ My Journal</div>
-            <div style={{ fontSize: 12, color: "#9ca3af" }}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
+        /* HEADER */
+        .header { grid-column: 1/-1; display: flex; align-items: center; justify-content: space-between; padding: 18px 32px; border-bottom: 1px solid var(--gray-2); position: sticky; top: 0; z-index: 100; background: var(--black); }
+        .header-logo { font-family: var(--font-display); font-size: 2.2rem; letter-spacing: 0.05em; line-height: 1; }
+        .header-logo span { color: var(--accent); }
+        .header-meta { font-family: var(--font-mono); font-size: 0.62rem; color: var(--gray-4); text-transform: uppercase; letter-spacing: 0.15em; }
+        .header-actions { display: flex; gap: 10px; }
+        .btn-ghost { background: none; border: 1px solid var(--gray-2); color: var(--gray-4); font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; padding: 8px 14px; cursor: pointer; transition: all 0.15s; }
+        .btn-ghost:hover { border-color: var(--white); color: var(--white); }
+        .btn-ghost.active { border-color: var(--accent); color: var(--accent); }
+
+        /* SIDEBAR */
+        .sidebar { border-right: 1px solid var(--gray-2); overflow-y: auto; }
+        .sidebar-header { padding: 18px 20px 12px; border-bottom: 1px solid var(--gray-2); display: flex; justify-content: space-between; align-items: center; }
+        .sidebar-title { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gray-4); }
+        .entry-count { font-family: var(--font-mono); font-size: 0.58rem; color: var(--gray-3); }
+        .entry-item { padding: 14px 20px; border-bottom: 1px solid var(--gray-1); cursor: pointer; transition: background 0.1s; position: relative; }
+        .entry-item:hover { background: var(--gray-1); }
+        .entry-item.active { background: var(--gray-1); }
+        .entry-item.active::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+        .entry-date { font-family: var(--font-mono); font-size: 0.54rem; letter-spacing: 0.15em; color: var(--accent); margin-bottom: 3px; }
+        .entry-title { font-size: 0.9rem; color: var(--white); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+        .entry-preview { font-size: 0.8rem; color: var(--gray-4); line-height: 1.4; font-style: italic; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+        .entry-blocks { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+        .entry-block-tag { font-family: var(--font-mono); font-size: 0.5rem; color: var(--gray-3); border: 1px solid var(--gray-2); padding: 2px 6px; letter-spacing: 0.1em; }
+        .sidebar-empty { padding: 40px 20px; text-align: center; font-family: var(--font-mono); font-size: 0.58rem; color: var(--gray-3); letter-spacing: 0.1em; text-transform: uppercase; }
+
+        /* MAIN */
+        .main { overflow-y: auto; display: flex; flex-direction: column; }
+
+        /* EDITOR */
+        .editor { flex: 1; padding: 36px 48px 60px; max-width: 860px; animation: fadeUp 0.35s ease both; }
+        .editor-dateline { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gray-4); margin-bottom: 12px; display: flex; align-items: center; gap: 14px; }
+        .editor-dateline::after { content: ''; flex: 1; height: 1px; background: var(--gray-2); }
+        .editor-headline { font-family: var(--font-display); font-size: clamp(2.8rem, 5vw, 5rem); line-height: 0.95; letter-spacing: 0.02em; margin-bottom: 28px; }
+        .editor-headline span { color: var(--accent); }
+        .title-input { width: 100%; background: none; border: none; border-bottom: 1px solid var(--gray-2); outline: none; color: var(--white); font-family: var(--font-body); font-size: 1.3rem; font-weight: 400; padding: 0 0 10px; margin-bottom: 24px; caret-color: var(--accent); }
+        .title-input::placeholder { color: var(--gray-3); font-style: italic; }
+
+        /* BLOCKS */
+        .block-wrap { position: relative; margin-bottom: 8px; padding: 10px 12px; border: 1px solid transparent; transition: border-color 0.15s; }
+        .block-wrap:hover { border-color: var(--gray-2); }
+        .block-wrap:hover .block-controls { opacity: 1; }
+        .block-controls { position: absolute; top: 6px; right: 8px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
+        .block-controls button { background: var(--gray-1); border: 1px solid var(--gray-2); color: var(--gray-4); font-size: 11px; padding: 2px 7px; cursor: pointer; font-family: var(--font-mono); transition: all 0.1s; }
+        .block-controls button:hover { color: var(--white); border-color: var(--gray-3); }
+        .block-textarea { width: 100%; background: none; border: none; outline: none; resize: none; color: var(--white); font-family: var(--font-body); font-size: 1.15rem; line-height: 1.85; font-weight: 300; caret-color: var(--accent); }
+        .block-textarea::placeholder { color: var(--gray-3); font-style: italic; }
+        .block-input { width: 100%; background: none; border: none; border-bottom: 1px solid var(--gray-2); outline: none; color: var(--white); font-family: var(--font-body); font-size: 1.05rem; font-weight: 300; padding: 4px 0; caret-color: var(--accent); }
+        .block-input::placeholder { color: var(--gray-3); }
+        .block-type-label { font-family: var(--font-mono); font-size: 0.52rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gray-3); margin-bottom: 8px; }
+        .block-btn-sm { font-family: var(--font-mono); font-size: 0.55rem; letter-spacing: 0.12em; text-transform: uppercase; padding: 5px 10px; background: none; border: 1px solid var(--gray-2); color: var(--gray-4); cursor: pointer; margin-top: 6px; transition: all 0.15s; }
+        .block-btn-sm:hover { border-color: var(--gray-3); color: var(--white); }
+        .block-upload-btn { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 10px 16px; background: var(--gray-1); border: 1px solid var(--gray-2); color: var(--gray-4); cursor: pointer; transition: all 0.15s; display: inline-block; }
+        .block-upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* DIVIDER */
+        .divider { height: 1px; background: var(--gray-2); margin: 20px 0; }
+
+        /* MOOD */
+        .section-label { font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gray-4); margin-bottom: 10px; }
+        .mood-grid { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 20px; }
+        .mood-btn { background: var(--gray-1); border: 1px solid var(--gray-2); color: var(--white); font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.08em; padding: 7px 12px; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 6px; }
+        .mood-btn:hover { border-color: var(--gray-3); }
+        .mood-btn.selected { background: var(--accent); border-color: var(--accent); color: var(--black); }
+
+        /* TAGS */
+        .tags-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 24px; }
+        .tag-btn { background: none; border: 1px solid var(--gray-2); color: var(--gray-4); font-family: var(--font-mono); font-size: 0.54rem; letter-spacing: 0.12em; text-transform: uppercase; padding: 5px 10px; cursor: pointer; transition: all 0.15s; }
+        .tag-btn:hover { border-color: var(--gray-3); color: var(--white); }
+        .tag-btn.selected { border-color: var(--white); color: var(--white); }
+
+        /* AUDIO */
+        .audio-block { background: var(--gray-1); border: 1px solid var(--gray-2); padding: 12px 16px; margin-bottom: 16px; }
+        .audio-label { font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+        audio { width: 100%; height: 32px; }
+
+        /* ACTION BUTTONS */
+        .editor-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+        .btn-primary { background: var(--white); border: none; color: var(--black); font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; padding: 12px 22px; cursor: pointer; transition: all 0.15s; }
+        .btn-primary:hover { background: var(--accent); }
+        .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
+        .btn-accent { background: var(--accent); border: none; color: var(--black); font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; padding: 12px 22px; cursor: pointer; transition: opacity 0.15s; }
+        .btn-accent:hover { opacity: 0.85; }
+        .btn-accent:disabled { opacity: 0.35; cursor: not-allowed; }
+        .btn-mic { background: none; border: 1px solid var(--gray-2); color: var(--gray-4); font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 12px 18px; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 8px; }
+        .btn-mic.recording { border-color: var(--red); color: var(--red); animation: pulse-border 1.2s infinite; }
+        .btn-danger { background: none; border: 1px solid #3a1a1a; color: var(--red); font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; padding: 10px 18px; cursor: pointer; transition: all 0.15s; }
+        .btn-danger:hover { border-color: var(--red); }
+        .word-count { font-family: var(--font-mono); font-size: 0.56rem; color: var(--gray-3); letter-spacing: 0.08em; }
+        .autosave { font-family: var(--font-mono); font-size: 0.56rem; color: #3a9a6a; letter-spacing: 0.1em; margin-left: auto; }
+
+        @keyframes pulse-border { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,59,59,0.3); } 50% { box-shadow: 0 0 0 6px rgba(255,59,59,0); } }
+
+        /* REFLECTION */
+        .reflection-panel { margin-top: 36px; border-top: 3px solid var(--white); padding-top: 28px; }
+        .reflection-label { font-family: var(--font-display); font-size: 0.72rem; letter-spacing: 0.3em; color: var(--gray-4); margin-bottom: 16px; }
+        .reflection-text { font-family: var(--font-body); font-size: 1.15rem; line-height: 1.9; font-style: italic; font-weight: 300; padding-left: 22px; border-left: 2px solid var(--accent); }
+        .dot-pulse { display: flex; gap: 5px; align-items: center; }
+        .dot-pulse span { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; animation: blink 1.2s infinite; }
+        .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+        .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0.15; } 40% { opacity: 1; } }
+
+        /* DETAIL */
+        .detail-view { padding: 36px 48px 60px; max-width: 860px; animation: fadeUp 0.3s ease both; }
+        .detail-back { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--gray-4); background: none; border: none; cursor: pointer; margin-bottom: 28px; display: flex; align-items: center; gap: 8px; transition: color 0.15s; padding: 0; }
+        .detail-back:hover { color: var(--white); }
+        .detail-headline { font-family: var(--font-display); font-size: clamp(2.2rem, 5vw, 4rem); line-height: 0.95; margin-bottom: 14px; letter-spacing: 0.02em; }
+        .detail-date { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.2em; color: var(--accent); text-transform: uppercase; margin-bottom: 16px; }
+        .detail-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 20px; }
+        .detail-tag { font-family: var(--font-mono); font-size: 0.52rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gray-4); border: 1px solid var(--gray-2); padding: 4px 9px; }
+        .detail-actions { display: flex; gap: 10px; margin-top: 32px; flex-wrap: wrap; }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: var(--black); }
+        ::-webkit-scrollbar-thumb { background: var(--gray-2); }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+        @media (max-width: 700px) {
+          .app { grid-template-columns: 1fr; }
+          .sidebar { display: none; }
+          .editor, .detail-view { padding: 20px 16px 60px; }
+          .editor-headline { font-size: 2.6rem; }
+          .detail-headline { font-size: 2rem; }
+        }
+      `}</style>
+
+      <div className="app">
+
+        {/* HEADER */}
+        <header className="header">
+          <div className="header-logo">THE<span>JOURNAL</span></div>
+          <div className="header-meta">{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).toUpperCase()}</div>
+          <div className="header-actions">
+            <button className={`btn-ghost ${view === "editor" ? "active" : ""}`} onClick={newEntry}>New Entry</button>
+            <button className="btn-ghost">Archive ({entries.length})</button>
           </div>
-          {view !== "write" && (
-            <button onClick={() => { setView("write"); setDraft({ title: "", body: "", mood: "😊", tags: "" }); setAudioPath(null); setAudioURL(null); }}
-              style={{ background: "linear-gradient(135deg,#a855f7,#6366f1)", color: "#fff", border: "none", borderRadius: 50, padding: "10px 18px", fontWeight: 700, fontSize: 14, cursor: "pointer", boxShadow: "0 4px 12px rgba(168,85,247,0.4)" }}>
-              + New
-            </button>
-          )}
-        </div>
-      </div>
+        </header>
 
-      {/* Content */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 90px" }}>
-
-        {/* HOME */}
-        {view === "home" && (
-          entries.length === 0
-            ? <div style={{ textAlign: "center", marginTop: 80, color: "#a78bfa" }}>
-                <div style={{ fontSize: 56 }}>📓</div>
-                <div style={{ fontWeight: 700, fontSize: 18, marginTop: 12 }}>No entries yet</div>
-                <div style={{ fontSize: 14, color: "#c4b5fd", marginTop: 6 }}>Tap "+ New" to write your first entry</div>
+        {/* SIDEBAR */}
+        <aside className="sidebar">
+          <div className="sidebar-header">
+            <span className="sidebar-title">Recent</span>
+            <span className="entry-count">{entries.length}</span>
+          </div>
+          {entries.length === 0 ? (
+            <div className="sidebar-empty">No entries yet</div>
+          ) : entries.map(entry => (
+            <div key={entry.id} className={`entry-item ${activeEntry?.id === entry.id && view === "detail" ? "active" : ""}`} onClick={() => { setActiveEntry(entry); setView("detail"); }}>
+              <div className="entry-date">{shortDate(entry.timestamp)}</div>
+              <div className="entry-title">{entry.title}</div>
+              <div className="entry-preview">{getPlainText(entry.blocks || [])}</div>
+              <div className="entry-blocks">
+                {[...new Set((entry.blocks || []).map(b => b.type).filter(t => t !== BLOCK.TEXT))].map(t => (
+                  <span key={t} className="entry-block-tag">{t}</span>
+                ))}
+                {entry.mood && <span className="entry-block-tag">{entry.mood.emoji}</span>}
               </div>
-            : entries.map(e => (
-                <div key={e.id} onClick={() => { setActiveEntry(e); setView("entry"); }}
-                  style={{ background: "rgba(255,255,255,0.75)", borderRadius: 20, padding: 16, marginBottom: 14, cursor: "pointer", boxShadow: "0 2px 12px rgba(0,0,0,0.07)", borderLeft: `5px solid ${e.color}`, backdropFilter: "blur(6px)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontWeight: 700, fontSize: 16, color: "#4c1d95", flex: 1, marginRight: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{e.title}</div>
-                    <span style={{ fontSize: 22 }}>{e.mood}</span>
-                  </div>
-                  <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{e.body}</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
-                    <div style={{ fontSize: 11, color: "#a78bfa" }}>{formatDate(e.timestamp)}</div>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      {e.audioPath && <span style={{ fontSize: 11, background: "#ede9fe", color: "#7c3aed", borderRadius: 10, padding: "2px 8px" }}>🎙 audio</span>}
-                      {e.tags.slice(0, 2).map(t => <span key={t} style={{ fontSize: 11, background: "#fce7f3", color: "#be185d", borderRadius: 10, padding: "2px 8px" }}>#{t}</span>)}
-                    </div>
-                  </div>
-                </div>
-              ))
-        )}
+            </div>
+          ))}
+        </aside>
 
-        {/* WRITE */}
-        {view === "write" && (
-          <div style={{ background: "rgba(255,255,255,0.85)", borderRadius: 24, padding: 20, boxShadow: "0 4px 20px rgba(0,0,0,0.08)" }}>
-            <input value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))}
-              placeholder="Entry title..."
-              style={{ width: "100%", border: "none", background: "transparent", fontSize: 20, fontWeight: 700, color: "#4c1d95", outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
-            <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-              {MOODS.map(m => (
-                <button key={m} onClick={() => setDraft(d => ({ ...d, mood: m }))}
-                  style={{ fontSize: 20, background: draft.mood === m ? "#ede9fe" : "transparent", border: draft.mood === m ? "2px solid #a855f7" : "2px solid transparent", borderRadius: 10, cursor: "pointer", padding: 2 }}>
-                  {m}
-                </button>
+        {/* MAIN */}
+        <main className="main">
+
+          {/* ── EDITOR ── */}
+          {view === "editor" && (
+            <div className="editor">
+              <div className="editor-dateline">
+                {new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }).toUpperCase()}
+                <span style={{ color: "var(--gray-2)" }}>◆</span>
+                Personal Record
+              </div>
+              <h1 className="editor-headline">What's on<br />your <span>mind?</span></h1>
+
+              <input className="title-input" value={title} onChange={e => setTitle(e.target.value)} placeholder="Give this entry a title..." />
+
+              {/* BLOCKS */}
+              {blocks.map((block, idx) => (
+                <BlockEditor
+                  key={block.id}
+                  block={block}
+                  onChange={updated => updateBlock(block.id, updated)}
+                  onDelete={() => deleteBlock(block.id)}
+                  onMoveUp={() => moveBlock(block.id, -1)}
+                  onMoveDown={() => moveBlock(block.id, 1)}
+                  onAddAfter={(type) => addBlockAfter(block.id, type)}
+                />
               ))}
-            </div>
-            <textarea value={draft.body} onChange={e => setDraft(d => ({ ...d, body: e.target.value }))}
-              placeholder="What's on your mind? Write or tap the mic to record all voices..."
-              style={{ width: "100%", minHeight: 160, border: "none", background: "#faf5ff", borderRadius: 14, padding: 14, fontSize: 15, color: "#374151", outline: "none", resize: "none", lineHeight: 1.7, boxSizing: "border-box" }} />
-            <input value={draft.tags} onChange={e => setDraft(d => ({ ...d, tags: e.target.value }))}
-              placeholder="Tags (comma separated)"
-              style={{ width: "100%", border: "none", background: "#fdf2f8", borderRadius: 12, padding: "10px 14px", fontSize: 13, color: "#6b7280", outline: "none", marginTop: 10, boxSizing: "border-box" }} />
-            {audioURL && (
-              <div style={{ marginTop: 12, background: "#ede9fe", borderRadius: 12, padding: 10 }}>
-                <div style={{ fontSize: 12, color: "#7c3aed", fontWeight: 600, marginBottom: 6 }}>🎙 Recorded Audio</div>
-                <audio controls src={audioURL} style={{ width: "100%", height: 36 }} />
-              </div>
-            )}
-            {savedMsg && <div style={{ fontSize: 12, color: "#10b981", marginTop: 8, textAlign: "right" }}>✓ Auto-saved</div>}
-            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <button onClick={recording ? stopRecording : startRecording}
-                style={{ flex: 1, padding: "12px 0", borderRadius: 50, border: "none", background: recording ? "linear-gradient(135deg,#ef4444,#dc2626)" : "linear-gradient(135deg,#8b5cf6,#6366f1)", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
-                {recording ? "⏹ Stop" : "🎙 Record"}
-              </button>
-              <button onClick={saveEntry} disabled={saving || (!draft.body.trim() && !draft.title.trim())}
-                style={{ flex: 1, padding: "12px 0", borderRadius: 50, border: "none", background: saving ? "#e5e7eb" : "linear-gradient(135deg,#f472b6,#a855f7)", color: saving ? "#9ca3af" : "#fff", fontWeight: 700, fontSize: 14, cursor: saving ? "not-allowed" : "pointer" }}>
-                {saving ? "Saving..." : "💾 Save"}
-              </button>
-            </div>
-            <button onClick={() => setView("home")} style={{ width: "100%", marginTop: 10, padding: "10px 0", borderRadius: 50, border: "2px solid #e9d5ff", background: "transparent", color: "#9333ea", fontWeight: 600, cursor: "pointer" }}>
-              Cancel
-            </button>
-          </div>
-        )}
 
-        {/* ENTRY VIEW */}
-        {view === "entry" && activeEntry && (
-          <div>
-            <button onClick={() => setView("home")} style={{ background: "rgba(255,255,255,0.7)", border: "none", borderRadius: 50, padding: "8px 16px", color: "#7c3aed", fontWeight: 600, cursor: "pointer", marginBottom: 14 }}>← Back</button>
-            <div style={{ background: "rgba(255,255,255,0.85)", borderRadius: 24, padding: 20, boxShadow: "0 4px 20px rgba(0,0,0,0.08)", borderTop: `6px solid ${activeEntry.color}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div style={{ fontSize: 20, fontWeight: 800, color: "#4c1d95", flex: 1 }}>{activeEntry.title}</div>
-                <span style={{ fontSize: 28 }}>{activeEntry.mood}</span>
-              </div>
-              <div style={{ fontSize: 12, color: "#a78bfa", marginTop: 4 }}>{formatDate(activeEntry.timestamp)}</div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-                {activeEntry.tags.map(t => <span key={t} style={{ fontSize: 12, background: "#fce7f3", color: "#be185d", borderRadius: 10, padding: "3px 10px" }}>#{t}</span>)}
-              </div>
-              <div style={{ marginTop: 16, fontSize: 15, color: "#374151", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{activeEntry.body}</div>
+              <AddBlockToolbar onAdd={addBlock} />
+
               {audioURL && (
-                <div style={{ marginTop: 16, background: "#ede9fe", borderRadius: 14, padding: 12 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#7c3aed", marginBottom: 8 }}>🎙 Voice Recording</div>
-                  <audio controls src={audioURL} style={{ width: "100%" }} />
+                <div className="audio-block">
+                  <div className="audio-label">⏺ Voice Recording</div>
+                  <audio controls src={audioURL} />
                 </div>
               )}
-              <div style={{ marginTop: 20, background: "linear-gradient(135deg,#fdf4ff,#ede9fe)", borderRadius: 16, padding: 16 }}>
-                <div style={{ fontWeight: 700, color: "#7c3aed", fontSize: 14, marginBottom: 8 }}>✨ AI Reflection</div>
-                {activeEntry.aiReflection
-                  ? <div style={{ fontSize: 14, color: "#4c1d95", lineHeight: 1.7 }}>{activeEntry.aiReflection}</div>
-                  : <button onClick={() => getAIReflection(activeEntry)} disabled={aiLoading}
-                      style={{ width: "100%", padding: "10px 0", borderRadius: 50, border: "none", background: "linear-gradient(135deg,#a855f7,#6366f1)", color: "#fff", fontWeight: 700, fontSize: 14, cursor: aiLoading ? "not-allowed" : "pointer", opacity: aiLoading ? 0.7 : 1 }}>
-                      {aiLoading ? "Reflecting..." : "✨ Get AI Reflection"}
-                    </button>
+
+              <div className="divider" />
+
+              <p className="section-label">Today's register</p>
+              <div className="mood-grid">
+                {MOODS.map(m => (
+                  <button key={m.label} className={`mood-btn ${mood?.label === m.label ? "selected" : ""}`} onClick={() => setMood(mood?.label === m.label ? null : m)}>
+                    <span>{m.emoji}</span>{m.label}
+                  </button>
+                ))}
+              </div>
+
+              <p className="section-label">Index</p>
+              <div className="tags-row">
+                {TAGS.map(tag => (
+                  <button key={tag} className={`tag-btn ${tags.includes(tag) ? "selected" : ""}`} onClick={() => toggleTag(tag)}>{tag}</button>
+                ))}
+              </div>
+
+              <div className="editor-actions">
+                <button className="btn-primary" onClick={saveEntry} disabled={saving || (!getPlainText(blocks) && !title)}>
+                  {saving ? "Saving..." : "Save Entry"}
+                </button>
+                <button className={`btn-mic ${recording ? "recording" : ""}`} onClick={recording ? stopRecording : startRecording}>
+                  <span>{recording ? "⬛" : "⏺"}</span>{recording ? "Stop" : "Voice"}
+                </button>
+                <span className="word-count">{wordCount} {wordCount === 1 ? "word" : "words"}</span>
+                {savedMsg && <span className="autosave">✓ saved</span>}
+              </div>
+            </div>
+          )}
+
+          {/* ── DETAIL ── */}
+          {view === "detail" && activeEntry && (
+            <div className="detail-view">
+              <button className="detail-back" onClick={newEntry}>← New entry</button>
+              <div className="detail-headline">{activeEntry.title || "Untitled Entry"}</div>
+              <div className="detail-date">
+                {formatDate(activeEntry.timestamp).toUpperCase()}
+                {activeEntry.mood && <span style={{ marginLeft: 14 }}>{activeEntry.mood.emoji} {activeEntry.mood.label}</span>}
+              </div>
+              {activeEntry.tags?.length > 0 && (
+                <div className="detail-tags">{activeEntry.tags.map(t => <span key={t} className="detail-tag">{t}</span>)}</div>
+              )}
+              <div className="divider" />
+
+              {/* Render all blocks */}
+              {(activeEntry.blocks || []).map(block => <BlockViewer key={block.id} block={block} />)}
+
+              {activeEntry.audioURL && (
+                <div className="audio-block" style={{ marginTop: 20 }}>
+                  <div className="audio-label">⏺ Voice Recording</div>
+                  <audio controls src={activeEntry.audioURL} />
+                </div>
+              )}
+
+              <div className="reflection-panel">
+                <div className="reflection-label">Reflection</div>
+                {aiLoading ? <div className="dot-pulse"><span /><span /><span /></div>
+                  : activeEntry.aiReflection
+                    ? <p className="reflection-text">{activeEntry.aiReflection}</p>
+                    : <button className="btn-accent" onClick={() => getAIReflection(activeEntry)} disabled={aiLoading}>Get AI Reflection</button>
                 }
               </div>
-              <button onClick={() => deleteEntry(activeEntry.id)}
-                style={{ width: "100%", marginTop: 16, padding: "10px 0", borderRadius: 50, border: "2px solid #fca5a5", background: "transparent", color: "#ef4444", fontWeight: 600, cursor: "pointer" }}>
-                🗑 Delete Entry
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
 
-      {/* Bottom Nav */}
-      <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "rgba(255,255,255,0.85)", backdropFilter: "blur(12px)", borderTop: "1px solid rgba(255,255,255,0.9)", display: "flex", justifyContent: "space-around", padding: "10px 0 24px", zIndex: 20 }}>
-        <button onClick={() => setView("home")} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: view === "home" ? "#7c3aed" : "#9ca3af", fontWeight: view === "home" ? 700 : 400 }}>
-          <span style={{ fontSize: 22 }}>🏠</span><span style={{ fontSize: 11 }}>Home</span>
-        </button>
-        <button onClick={() => { setView("write"); setDraft({ title: "", body: "", mood: "😊", tags: "" }); setAudioPath(null); setAudioURL(null); }}
-          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: view === "write" ? "#7c3aed" : "#9ca3af", fontWeight: view === "write" ? 700 : 400 }}>
-          <span style={{ fontSize: 22 }}>✏️</span><span style={{ fontSize: 11 }}>Write</span>
-        </button>
-        <button onClick={() => setView("home")} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: "#9ca3af" }}>
-          <span style={{ fontSize: 22 }}>📚</span><span style={{ fontSize: 11 }}>Entries ({entries.length})</span>
-        </button>
+              <div className="detail-actions">
+                <button className="btn-danger" onClick={() => deleteEntry(activeEntry.id)}>Delete Entry</button>
+              </div>
+            </div>
+          )}
+
+        </main>
       </div>
-    </div>
+    </>
   );
 }
